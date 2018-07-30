@@ -88,12 +88,16 @@ func main() {
 		log.WithError(err).Fatal("Unable to read configuration file")
 	}
 
-	if err := yaml.Unmarshal(yamlSource, &mainCfg); err != nil {
+	if err = yaml.Unmarshal(yamlSource, &mainCfg); err != nil {
 		log.WithError(err).Fatal("Unable to load configuration file")
 	}
 
-	if err := initializeAuthenticators(yamlSource); err != nil {
+	if err = initializeAuthenticators(yamlSource); err != nil {
 		log.WithError(err).Fatal("Unable to configure authentication")
+	}
+
+	if err = initializeMFAProviders(yamlSource); err != nil {
+		log.WithError(err).Fatal("Unable to configure MFA providers")
 	}
 
 	cookieStore = sessions.NewCookieStore([]byte(mainCfg.Cookie.AuthKey))
@@ -135,9 +139,23 @@ func handleLoginRequest(res http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == "POST" {
-		err := loginUser(res, r)
+		user, err := loginUser(res, r)
 		switch err {
 		case errNoValidUserFound:
+			http.Redirect(res, r, "/login?go="+url.QueryEscape(r.FormValue("go")), http.StatusFound)
+			return
+		case nil:
+			// Don't handle for now, MFA validation comes first
+		default:
+			log.WithError(err).Error("Login failed with unexpected error")
+			http.Redirect(res, r, "/login?go="+url.QueryEscape(r.FormValue("go")), http.StatusFound)
+			return
+		}
+
+		err = validateMFA(res, r, user)
+		switch err {
+		case errNoValidUserFound:
+			res.Header().Del("Set-Cookie") // Remove login cookie
 			http.Redirect(res, r, "/login?go="+url.QueryEscape(r.FormValue("go")), http.StatusFound)
 			return
 		case nil:
@@ -145,6 +163,7 @@ func handleLoginRequest(res http.ResponseWriter, r *http.Request) {
 			return
 		default:
 			log.WithError(err).Error("Login failed with unexpected error")
+			res.Header().Del("Set-Cookie") // Remove login cookie
 			http.Redirect(res, r, "/login?go="+url.QueryEscape(r.FormValue("go")), http.StatusFound)
 			return
 		}
